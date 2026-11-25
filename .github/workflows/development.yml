@@ -27,7 +27,7 @@ jobs:
           - platform: 2
             platform_name: ios
 
-    runs-on: macos-latest
+    runs-on: macos-15-intel
 
     # 发布 nightly release 需要 contents: write
     permissions:
@@ -203,6 +203,8 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: 77b3a974d1ca7bfbd379e0068ef58c04351335f9
 
       - name: Validate Localizable.strings syntax (Task228 gate)
         # 病历：Task191 与 Task228（Task227 引入）两次因值内引号未转义把
