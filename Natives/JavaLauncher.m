@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <mach/mach.h>
@@ -31,13 +32,21 @@
 #define fm NSFileManager.defaultManager
 
 extern char **environ;
+extern uint64_t os_proc_available_memory(void);
 
-BOOL validateVirtualMemorySpace(size_t size) {
-    size <<= 20; // convert to MB
-    void *map = mmap(0, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    // check if process successfully maps and unmaps a contiguous range
-    if(map == MAP_FAILED || munmap(map, size) != 0)
+static BOOL validateVirtualMemorySpace(size_t heapMiB) {
+    size_t bytes = heapMiB << 20;
+    void *map = mmap(NULL, bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (map == MAP_FAILED) {
+        int error = errno;
+        NSLog(@"[HeapVA] mmap(NULL) failed for %zu MiB, errno=%d", heapMiB, error);
         return NO;
+    }
+    if (munmap(map, bytes) != 0) {
+        int error = errno;
+        NSLog(@"[HeapVA] probe cleanup failed for %zu MiB, errno=%d", heapMiB, error);
+        return NO;
+    }
     return YES;
 }
 
@@ -3117,13 +3126,28 @@ int launchJVM(NSString *accountId, id launchTarget, int width, int height, int m
                   launchTarget[@"id"], launchTarget[@"type"], allocmem);
         }
     }
-    if (!validateVirtualMemorySpace(allocmem)) {
-        UIKit_returnToSplitView();
-        if (getEntitlementValue(@"com.apple.developer.kernel.increased-memory-limit")) {
-            showDialog(localize(@"Error", nil), @"Insufficient contiguous virtual memory space. Lower memory allocation and try again.");
-        } else {
-            showDialog(localize(@"Error", nil), @"Insufficient contiguous virtual memory space. Increased Memory Limit entitlement is missing, please add it via GetMoreRam app.");
+    NSString *bundledJava25 = [NSBundle.mainBundle.bundlePath
+        stringByAppendingPathComponent:@"java_runtimes/java-25-openjdk"];
+    BOOL largeHeapLaunch = NO;
+    if (@available(iOS 27.0, *)) {
+        largeHeapLaunch = allocmem >= 8192 && [javaHome isEqualToString:bundledJava25]
+            && getEntitlementValue(@"com.apple.developer.kernel.extended-virtual-addressing")
+            && getEntitlementValue(@"com.apple.developer.kernel.increased-memory-limit");
+    }
+
+    // The JVM makes the authoritative reservation, including alignment and guards.
+    if (largeHeapLaunch) {
+        uint64_t availableMiB = os_proc_available_memory() >> 20;
+        NSLog(@"[HeapVA] requested=%d MiB, live headroom=%llu MiB, bundled Java 25",
+              allocmem, (unsigned long long)availableMiB);
+        if (availableMiB < (uint64_t)allocmem + 1200) {
+            UIKit_returnToSplitView();
+            showDialog(localize(@"Error", nil), @"Current process memory budget is too low for this Java heap. Lower memory allocation and try again.");
+            return 1;
         }
+    } else if (!validateVirtualMemorySpace(allocmem)) {
+        UIKit_returnToSplitView();
+        showDialog(localize(@"Error", nil), @"Insufficient contiguous virtual memory space. Lower memory allocation and try again.");
         return 1;
     }
 
@@ -3187,6 +3211,9 @@ int launchJVM(NSString *accountId, id launchTarget, int width, int height, int m
         PUSH_MARGV_LITERAL("-Xms128M");
     }
     PUSH_MARGV_FORMAT(@"-Xmx%dM", allocmem);
+    if (largeHeapLaunch) {
+        PUSH_MARGV_LITERAL("-Xlog:gc+heap+coops=debug,os+map=info,metaspace=info:stdout:level,tags");
+    }
     // ============================================================================
     // Task68: GC / safepoint 停顿观测（「加载区块卡顿」归因层）
     // ============================================================================
