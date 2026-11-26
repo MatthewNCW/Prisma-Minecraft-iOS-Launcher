@@ -7,6 +7,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdarg.h>
 #include <math.h>
 #include <dirent.h>
 #include <string.h>
@@ -26,6 +29,96 @@ extern uint64_t os_proc_available_memory(void);
 
 CFTypeRef SecTaskCopyValueForEntitlement(void* task, NSString* entitlement, CFErrorRef  _Nullable *error);
 void* SecTaskCreateFromSelf(CFAllocatorRef allocator);
+
+void prismaArchiveLaunchDiagnostics(void) {
+    NSString *home = @(getenv("POJAV_HOME"));
+    NSFileManager *files = NSFileManager.defaultManager;
+    NSString *log = [home stringByAppendingPathComponent:@"latestlog.txt"];
+    NSString *checkpoints = [home stringByAppendingPathComponent:@"startup-checkpoints.txt"];
+    if (![files fileExistsAtPath:log] && ![files fileExistsAtPath:checkpoints]) return;
+
+    NSString *history = [home stringByAppendingPathComponent:@"LaunchDiagnostics"];
+    NSString *session = [history stringByAppendingPathComponent:
+        [NSString stringWithFormat:@"session-%020.0f-%@", NSDate.date.timeIntervalSince1970 * 1000,
+         NSUUID.UUID.UUIDString]];
+    NSError *error = nil;
+    if (![files createDirectoryAtPath:session withIntermediateDirectories:YES attributes:nil error:&error]) {
+        NSLog(@"[Startup] Cannot create diagnostics archive: %@", error);
+        return;
+    }
+
+    BOOL archivedAll = YES;
+    for (NSString *source in @[log, checkpoints]) {
+        if (![files fileExistsAtPath:source]) continue;
+        NSString *archived = [session stringByAppendingPathComponent:source.lastPathComponent];
+        if (rename(source.fileSystemRepresentation, archived.fileSystemRepresentation) != 0) {
+            NSLog(@"[Startup] Cannot archive %@: errno=%d", source.lastPathComponent, errno);
+            archivedAll = NO;
+            continue;
+        }
+        if ([source isEqualToString:log]) {
+            // Keep the traditional filenames available without copying the whole log.
+            NSArray<NSString *> *aliases = [files fileExistsAtPath:
+                [home stringByAppendingPathComponent:@"ame306_session.marker"]]
+                ? @[@"latestlog.old.txt", @"latestlog.crash.txt"] : @[@"latestlog.old.txt"];
+            for (NSString *alias in aliases) {
+                NSString *destination = [home stringByAppendingPathComponent:alias];
+                NSString *temporary = [session stringByAppendingPathComponent:alias];
+                if (link(archived.fileSystemRepresentation, temporary.fileSystemRepresentation) == 0) {
+                    if (rename(temporary.fileSystemRepresentation, destination.fileSystemRepresentation) != 0) {
+                        NSLog(@"[Startup] Cannot update %@: errno=%d", alias, errno);
+                        unlink(temporary.fileSystemRepresentation);
+                    }
+                } else {
+                    NSLog(@"[Startup] Cannot link %@: errno=%d", alias, errno);
+                }
+            }
+        }
+    }
+
+    if (!archivedAll) return;
+    NSArray<NSString *> *entries = [[files contentsOfDirectoryAtPath:history error:nil]
+        sortedArrayUsingSelector:@selector(compare:)];
+    NSMutableArray<NSString *> *sessions = [NSMutableArray array];
+    for (NSString *entry in entries) {
+        if ([entry hasPrefix:@"session-"]) [sessions addObject:entry];
+    }
+    for (NSUInteger index = 0; index + 8 < sessions.count; index++) {
+        [files removeItemAtPath:[history stringByAppendingPathComponent:sessions[index]] error:nil];
+    }
+}
+
+void prismaStartupCheckpoint(NSString *format, ...) {
+    const char *home = getenv("POJAV_HOME");
+    if (!home || !*home) return;
+
+    va_list args;
+    va_start(args, format);
+    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+    NSData *line = [[NSString stringWithFormat:@"%.3f pid=%d %@\n",
+        NSDate.date.timeIntervalSince1970, getpid(), message] dataUsingEncoding:NSUTF8StringEncoding];
+    NSString *path = [@(home) stringByAppendingPathComponent:@"startup-checkpoints.txt"];
+
+    // This path goes directly to disk, independently of the stdout/stderr reader.
+    int fd = open(path.fileSystemRepresentation, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    if (fd == -1) {
+        NSLog(@"[Startup] Cannot open checkpoint log: errno=%d", errno);
+        return;
+    }
+    ssize_t written;
+    do {
+        written = write(fd, line.bytes, line.length);
+    } while (written == -1 && errno == EINTR);
+    int syncResult;
+    do {
+        syncResult = fsync(fd);
+    } while (syncResult == -1 && errno == EINTR);
+    if (written != (ssize_t)line.length || syncResult == -1) {
+        NSLog(@"[Startup] Checkpoint write or sync failed: %@", message);
+    }
+    close(fd);
+}
 
 BOOL getEntitlementValue(NSString *key) {
     // Task88 修复：原实现 SecTaskCreateFromSelf 被调用了两次（secTask 与内联各一次）

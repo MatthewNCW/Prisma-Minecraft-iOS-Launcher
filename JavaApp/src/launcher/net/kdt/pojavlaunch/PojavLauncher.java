@@ -16,6 +16,7 @@ import net.kdt.pojavlaunch.value.*;
 public class PojavLauncher {
 
     public static void main(String[] args) throws Throwable {
+        recordJvmStartup();
         // Skip calling to com.apple.eawt.Application.nativeInitializeApplicationDelegate()
         Beans.setDesignTime(true);
         try {
@@ -50,6 +51,21 @@ public class PojavLauncher {
             UIKit.callback_JavaGUIViewController_launchJarFile(args[1], Arrays.copyOfRange(args, 2, args.length));
         } else {
             launchMinecraft(args);
+        }
+    }
+
+    private static void recordJvmStartup() {
+        try {
+            String home = System.getenv("POJAV_HOME");
+            if (home == null || home.isEmpty()) return;
+            String line = System.currentTimeMillis() + " JVM reached PojavLauncher.main java="
+                    + System.getProperty("java.version") + " maxHeapBytes=" + Runtime.getRuntime().maxMemory() + "\n";
+            try (FileOutputStream checkpoints = new FileOutputStream(new File(home, "startup-checkpoints.txt"), true)) {
+                checkpoints.write(line.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                checkpoints.getFD().sync();
+            }
+        } catch (IOException | SecurityException e) {
+            System.err.println("[Startup] Cannot persist JVM checkpoint: " + e);
         }
     }
 

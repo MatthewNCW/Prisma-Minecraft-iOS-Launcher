@@ -8,6 +8,7 @@
 
 #include <dlfcn.h>
 #include <execinfo.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <libgen.h>
 #include <os/lock.h>   // ★ Task274-f r2（F7 硬化）：os_unfair_lock/OS_UNFAIR_LOCK_INIT 声明头（前任 F7 改动依赖；utils.m 同款）
@@ -396,16 +397,16 @@ void ame306_consumeStaleGameSessionMarker(void) {
              (int)(strlen(ame306_tsLine) > 0 && ame306_tsLine[strlen(ame306_tsLine)-1] == '\n'
                    ? (int)strlen(ame306_tsLine) - 1 : (int)strlen(ame306_tsLine)), ame306_tsLine);
     snprintf(ame306_d1, sizeof(ame306_d1), "进程未执行任何退出钩子即消失（SIGKILL 级）—— 崩溃报告机制无法在进程被杀时落盘");
-    snprintf(ame306_d2, sizeof(ame306_d2), "常见成因: StikDebug 断连（debug 会话被回收）/ 系统看门狗 / 内存压力（jetsam）");
-    snprintf(ame306_d3, sizeof(ame306_d3), "详情请查 latestlog.txt 尾部（最后停在哪一步即闪退点，如 Mixin 阶段=模组加载期）");
+    snprintf(ame306_d2, sizeof(ame306_d2), "会话标记本身无法确定终止原因");
+    snprintf(ame306_d3, sizeof(ame306_d3), "请查看 LaunchDiagnostics 内与上次会话对应的 startup-checkpoints.txt 和 latestlog.txt");
     ame306_details[0].start = ame306_d0; ame306_details[0].len = (int)strlen(ame306_d0);
     ame306_details[1].start = ame306_d1; ame306_details[1].len = (int)strlen(ame306_d1);
     ame306_details[2].start = ame306_d2; ame306_details[2].len = (int)strlen(ame306_d2);
     ame306_details[3].start = ame306_d3; ame306_details[3].len = (int)strlen(ame306_d3);
     static const char ame306_headline[] =
-        "上次游戏会话被系统强制终止（无崩溃报告可落盘）";
+        "上次游戏会话未记录正常退出";
     static const char ame306_fix[] =
-        "保持 StikDebug 在前台或后台存活（勿从后台任务划掉它）后重试启动；若在加载后期死亡，尝试调低内存分配；复现时上传 latestlog.txt 供进一步定位";
+        "请保留 LaunchDiagnostics 中的会话日志，并核对同一时间和 PID 的系统诊断报告";
     ame273_write_report_file(ame306_home, 9,
                              "sigkill_like",
                              "进程异常终止（SIGKILL 级）",
@@ -427,6 +428,9 @@ void ame306_beginGameSessionMarker(const char *ame306_versionTag) {
     fprintf(ame306_f, "ts=%lld\npid=%d\nver=%s\n",
             (long long)time(NULL), getpid(),
             ame306_versionTag ? ame306_versionTag : "-");
+    if (fflush(ame306_f) != 0 || fsync(fileno(ame306_f)) != 0) {
+        prismaStartupCheckpoint(@"game session marker sync failed errno=%d", errno);
+    }
     fclose(ame306_f);
     NSLog(@"[Ame306] game session marker armed (%s)", ame306_path);
 }

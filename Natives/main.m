@@ -22,6 +22,7 @@
 #include <string.h>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include "utils.h"
 #include "codesign.h"
 
@@ -153,64 +154,20 @@ void init_logDeviceAndVer(char *argument) {
 }
 
 void init_redirectStdio() {
+    NSString *home = @(getenv("POJAV_HOME"));
+    NSString *currName = [home stringByAppendingPathComponent:@"latestlog.txt"];
     if (getenv("LOG_TO_CONSOLE") != NULL) {
-        NSLog(@"[Pre-init] LOG_TO_CONSOLE is set, not logging to latestlog.txt");
         return;
     }
 
-    NSLog(@"[Pre-init] Starting logging STDIO to latestlog.txt\n");
-
-    NSString *home = @(getenv("POJAV_HOME"));
-    NSString *currName = [home stringByAppendingPathComponent:@"latestlog.txt"];
-    NSString *oldName = [home stringByAppendingPathComponent:@"latestlog.old.txt"];
-    // Task 171：异常死亡证据保全（多人游戏偶发崩溃的日志总被轮换吃掉）。
-    // 病历：用户报"多人游戏有时候会崩溃，参考上一个提交的 log.old.txt"，
-    // 但该文件是干净的 26.3 多人会话（mysv.dpdns.org，60fps，干净
-    // exit(0)）——崩溃会话的 latestlog 在下一次启动的"先删后移"轮换里
-    // 只能存活一代，用户再玩一局就永远丢了（本会话日志即被覆盖）。
-    // 保全员：轮换前读旧 latestlog.txt 尾部 8KB，若没有 hooked_exit 的
-    // "exit(N) called" 终止标记（正常退出/退出码非零都会留痕；原生
-    // SIGSEGV/SIGKILL 类死亡无标记），把它复制为 latestlog.crash.txt
-    // （只保留最近一份，不参与轮换链）。下次崩溃后从应用容器直接取回
-    // 完整现场。
-    {
-        NSString *crashName = [home stringByAppendingPathComponent:@"latestlog.crash.txt"];
-        if ([fm fileExistsAtPath:currName]) {
-            NSData *tail = nil;
-            NSFileHandle *h = [NSFileHandle fileHandleForReadingAtPath:currName];
-            if (h) {
-                unsigned long long len = [h seekToEndOfFile];
-                unsigned long long off = (len > 8192) ? (len - 8192) : 0;
-                [h seekToFileOffset:off];
-                tail = [h readDataToEndOfFile];
-                [h closeFile];
-            }
-            BOOL hasExitMarker = NO;
-            if (tail) {
-                NSString *tailStr = [[NSString alloc] initWithData:tail
-                                                           encoding:NSUTF8StringEncoding];
-                hasExitMarker = (tailStr != nil) && [tailStr containsString:@") called"];
-            }
-            if (!hasExitMarker) {
-                NSError *cpErr = nil;
-                [fm removeItemAtPath:crashName error:nil];
-                if ([fm copyItemAtPath:currName toPath:crashName error:&cpErr]) {
-                    NSLog(@"[Pre-init] Task171: previous session died without an exit marker -- log preserved to latestlog.crash.txt (unclean-death forensics)");
-                } else {
-                    NSLog(@"[Pre-init] Task171: crash-log preservation failed: %@", cpErr.localizedDescription);
-                }
-            }
-        }
-    }
-    [fm removeItemAtPath:oldName error:nil];
-    [fm moveItemAtPath:currName toPath:oldName error:nil];
-
-    [fm createFileAtPath:currName contents:nil attributes:nil];
-    NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:currName];
+    // Append if rotation failed, so opening the new log cannot erase evidence.
+    int logFD = open(currName.fileSystemRepresentation, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    NSFileHandle *file = logFD < 0 ? nil : [[NSFileHandle alloc] initWithFileDescriptor:logFD closeOnDealloc:YES];
 
     if (!file) {
         NSLog(@"[Pre-init] Error: failed to open %@", currName);
-        assert(0 && "Failed to open latestlog.txt. Check oslog for more details.");
+        prismaStartupCheckpoint(@"stdio open failed errno=%d", errno);
+        return;
     }
 
     setvbuf(stdout, 0, _IOLBF, 0); // make stdout line-buffered
@@ -696,6 +653,8 @@ int main(int argc, char *argv[]) {
     setenv("BUNDLE_PATH", dirname(argv[0]), 1);
     isJailbroken = init_checkForJailbreak();
     init_setupHomeDirectory();
+    prismaArchiveLaunchDiagnostics();
+    prismaStartupCheckpoint(@"process startup os=%@", NSProcessInfo.processInfo.operatingSystemVersionString);
     init_redirectStdio();
     // Task 43：在此 fork shaderc 编译服务器（不 exec）。位置选择的三个理由：
     //   1) stderr 已接 latestlog 管道——子进程取证（sb_clog raw write）直接
@@ -709,6 +668,7 @@ int main(int argc, char *argv[]) {
     init_logDeviceAndVer(argv[0]);
 
     loadPreferences(NO);
+    prismaStartupCheckpoint(@"installing process hooks");
     init_hookFunctions();
     init_hookUIKitConstructor();
 
@@ -737,6 +697,7 @@ int main(int argc, char *argv[]) {
     init_setupAccounts();
     init_setupCustomControls();
     init_exportJIT26Script();
+    prismaStartupCheckpoint(@"startup configuration ready");
 
     // If sandbox is disabled, W^X JIT can be enabled by Amethyst itself
     if (!isJITEnabled(true) && getEntitlementValue(@"com.apple.private.security.no-sandbox")) {
@@ -761,6 +722,7 @@ int main(int argc, char *argv[]) {
     }
 
     @autoreleasepool {
+        prismaStartupCheckpoint(@"entering UIApplicationMain");
         return UIApplicationMain(argc, argv, nil, NSStringFromClass([AppDelegate class]));
     }
 }

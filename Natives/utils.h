@@ -372,6 +372,8 @@ void ame273_crashViewDidDismiss(void);
 void ame306_beginGameSessionMarker(const char *versionTag);
 void ame306_endGameSessionMarker(void);
 void ame306_consumeStaleGameSessionMarker(void);
+void prismaArchiveLaunchDiagnostics(void);
+void prismaStartupCheckpoint(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
 
 NSString* localize(NSString* key, NSString* comment);
 NSMutableDictionary* parseJSONFromFile(NSString *path);

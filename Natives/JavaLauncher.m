@@ -35,18 +35,22 @@ extern char **environ;
 extern uint64_t os_proc_available_memory(void);
 
 static BOOL validateVirtualMemorySpace(size_t heapMiB) {
+    prismaStartupCheckpoint(@"VA preflight begin heapMiB=%zu", heapMiB);
     size_t bytes = heapMiB << 20;
     void *map = mmap(NULL, bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (map == MAP_FAILED) {
         int error = errno;
+        prismaStartupCheckpoint(@"VA preflight mmap failed heapMiB=%zu errno=%d", heapMiB, error);
         NSLog(@"[HeapVA] mmap(NULL) failed for %zu MiB, errno=%d", heapMiB, error);
         return NO;
     }
     if (munmap(map, bytes) != 0) {
         int error = errno;
+        prismaStartupCheckpoint(@"VA preflight munmap failed heapMiB=%zu errno=%d", heapMiB, error);
         NSLog(@"[HeapVA] probe cleanup failed for %zu MiB, errno=%d", heapMiB, error);
         return NO;
     }
+    prismaStartupCheckpoint(@"VA preflight passed heapMiB=%zu", heapMiB);
     return YES;
 }
 
@@ -2331,12 +2335,15 @@ static BOOL ame304_requestAndAwaitJITIfNeeded(NSString *tag) {
         } else if ([ame304_enabler isEqualToString:@"auto"] && !ame304_isTrollStore) {
             ame304_useBuiltin = ame304_builtinAvail;
         }
+        prismaStartupCheckpoint(@"JIT request enabler=%@ builtin=%d builtinAvailable=%d",
+            ame304_enabler, ame304_useBuiltin, ame304_builtinAvail);
         NSLog(@"[JIT] [%@] Task304 enabler=%@ noScript=%d builtin=%d (avail=%d ts=%d)",
               tag, ame304_enabler, ame304_noScript, ame304_useBuiltin, ame304_builtinAvail, ame304_isTrollStore);
         NSURL *ame304_url = nil;
         if (ame304_useBuiltin) {
             ame304_requested = YES;
             [StikDebugViewController ame294_enableBuiltinJITWithCompletion:^(BOOL success, NSString *message) {
+                prismaStartupCheckpoint(@"JIT builtin completed success=%d csDebugged=%d", success, isJITEnabled(YES));
                 if (success || isJITEnabled(YES)) {
                     NSLog(@"[JIT] [%@] Task304 builtin track OK", tag);
                     return;
@@ -2358,9 +2365,12 @@ static BOOL ame304_requestAndAwaitJITIfNeeded(NSString *tag) {
                             [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"UniversalJIT26.js"]];
                         if (s) sd = [@"&script-data=" stringByAppendingString:[s base64EncodedStringWithOptions:0]];
                     }
+                    prismaStartupCheckpoint(@"JIT opening external enabler scheme=stikjit after builtin failure");
                     [UIApplication.sharedApplication openURL:[NSURL URLWithString:
                         [NSString stringWithFormat:@"stikjit://enable-jit?bundle-id=%@&pid=%d%@", ame304_bundleId, getpid(), sd]]
-                        options:@{} completionHandler:nil];
+                        options:@{} completionHandler:^(BOOL opened) {
+                            prismaStartupCheckpoint(@"JIT external enabler opened=%d", opened);
+                        }];
                 }
             }];
             return;
@@ -2406,7 +2416,10 @@ static BOOL ame304_requestAndAwaitJITIfNeeded(NSString *tag) {
                 @"sidestore://sidejit-enable?pid=%d", getpid()]];
         }
         if (ame304_url) {
-            [UIApplication.sharedApplication openURL:ame304_url options:@{} completionHandler:nil];
+            prismaStartupCheckpoint(@"JIT opening external enabler scheme=%@", ame304_url.scheme);
+            [UIApplication.sharedApplication openURL:ame304_url options:@{} completionHandler:^(BOOL opened) {
+                prismaStartupCheckpoint(@"JIT external enabler opened=%d", opened);
+            }];
         }
         ame304_requested = YES;
     };
@@ -2422,6 +2435,7 @@ static BOOL ame304_requestAndAwaitJITIfNeeded(NSString *tag) {
     }
     BOOL ame304_ok = ame169_waitForJITCondition(^{ return isJITEnabled(NO); }, 120.0,
         [NSString stringWithFormat:@"%@-JIT", tag] ?: @"Launch-JIT");
+    prismaStartupCheckpoint(@"JIT wait completed enabled=%d", ame304_ok);
     if (!ame304_ok) {
         NSLog(@"[JIT] [%@] Task304 JIT wait timed out (120s) -- continuing (region watchdog will fail gracefully without JIT)", tag);
     } else {
@@ -2432,6 +2446,9 @@ static BOOL ame304_requestAndAwaitJITIfNeeded(NSString *tag) {
 
 int launchJVM(NSString *accountId, id launchTarget, int width, int height, int minVersion) {
     NSLog(@"[JavaLauncher] Beginning JVM launch");
+    prismaStartupCheckpoint(@"game launch requested profileHeapMiB=%@ headroomMiB=%llu",
+        [PLProfiles current].selectedProfile[@"allocatedMemory"] ?: @"auto",
+        (unsigned long long)(os_proc_available_memory() >> 20));
 
     // Task175：占位 mainClass 预检（用户实测"forge1.8.9 装整合包后启动 =
     // ClassNotFoundException: net.angelaura.installer.MissingLoader 裸崩"）。
@@ -2499,6 +2516,12 @@ int launchJVM(NSString *accountId, id launchTarget, int width, int height, int m
     DeviceGetJITFlags(YES);
     BOOL requiresTXMWorkaround = DeviceHasJITFlags(JIT_FLAG_FORCE_MIRRORED | JIT_FLAG_HAS_TXM);
     BOOL jit26AlwaysAttached = getPrefBool(@"debug.debug_always_attached_jit");
+    prismaStartupCheckpoint(@"JIT precheck enabler=%@ helperPresent=%d txm=%d enabled=%d csDebugged=%d ptrace=%d exceptionPorts=%d",
+        getPrefObject(@"debug.jit_enabler") ?: @"auto",
+        [NSFileManager.defaultManager fileExistsAtPath:
+            [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"PlugIns/PrismaJITHelper.appex"]],
+        requiresTXMWorkaround, isJITEnabled(NO), isJITEnabled(YES),
+        JIT26DebuggerAttachedViaPtrace(), JIT26DebuggerViaExceptionPorts());
     // On TXM devices the dyld Library Validation bypass itself needs the
     // debugger: redirectFunctionMirrored() calls JIT26PrepareRegionForPatching()
     // which executes `brk #0xf00d` — that breakpoint must be handled by the
@@ -2525,7 +2548,12 @@ int launchJVM(NSString *accountId, id launchTarget, int width, int height, int m
         // ★ Task301：SIGTRAP 安全网只救得了"无异常端口"场景；死调试器残留
         // 端口下 brk 进 mach_msg 永久阻塞（用户实测"启动卡住"）——改走有界
         // 看门狗：超时自动跑内置 JIT 轨服务挂起的 brk，仍无果才优雅失败。
+        prismaStartupCheckpoint(@"JIT region begin enabled=%d csDebugged=%d ptrace=%d exceptionPorts=%d cached=%d",
+            isJITEnabled(NO), isJITEnabled(YES), JIT26DebuggerAttachedViaPtrace(),
+            JIT26DebuggerViaExceptionPorts(), result != NULL);
         if(!result) result = ame301_createRegionWithWatchdog();
+        prismaStartupCheckpoint(@"JIT region result=%@", !result ? @"unavailable" :
+            ((uint32_t)result == 0x690000E0 ? @"universal" : @"legacy"));
         if (!result) {
             NSLog(@"[JIT26] JIT26CreateRegionLegacy returned NULL — JIT26 debugger not servicing brk; aborting launch gracefully");
             showDialog(localize(@"Error", nil), localize(@"i18n_str_jit26_not_ready", nil));
@@ -2567,7 +2595,9 @@ int launchJVM(NSString *accountId, id launchTarget, int width, int height, int m
     // Previously this was skipped when requiresTXMWorkaround was true, which caused
     // JNA and other unsigned dylibs to fail with code signature errors.
     // The TXM hardware breakpoint mechanism (brk #0x69) does not conflict with dlopen hooks.
+    prismaStartupCheckpoint(@"dyld setup begin");
     init_bypassDyldLibValidation();
+    prismaStartupCheckpoint(@"dyld setup complete");
 
     // 加载 MobileGlues 配置（仅当用户手动选择 MobileGlues 渲染器时生效）
     init_loadMobileGluesConfig();
@@ -3135,12 +3165,20 @@ int launchJVM(NSString *accountId, id launchTarget, int width, int height, int m
             && getEntitlementValue(@"com.apple.developer.kernel.increased-memory-limit");
     }
 
+    uint64_t availableMiB = os_proc_available_memory() >> 20;
+    prismaStartupCheckpoint(@"heap effectiveMiB=%d headroomMiB=%llu runtime=%@ bundledJava25=%d extendedVA=%d increasedMemory=%d",
+        allocmem, (unsigned long long)availableMiB, javaHome.lastPathComponent,
+        [javaHome isEqualToString:bundledJava25],
+        getEntitlementValue(@"com.apple.developer.kernel.extended-virtual-addressing"),
+        getEntitlementValue(@"com.apple.developer.kernel.increased-memory-limit"));
+
     // The JVM makes the authoritative reservation, including alignment and guards.
     if (largeHeapLaunch) {
-        uint64_t availableMiB = os_proc_available_memory() >> 20;
+        prismaStartupCheckpoint(@"VA preflight skipped for bundled Java 25 large heap");
         NSLog(@"[HeapVA] requested=%d MiB, live headroom=%llu MiB, bundled Java 25",
               allocmem, (unsigned long long)availableMiB);
         if (availableMiB < (uint64_t)allocmem + 1200) {
+            prismaStartupCheckpoint(@"heap budget rejected requiredMiB=%llu", (unsigned long long)allocmem + 1200);
             UIKit_returnToSplitView();
             showDialog(localize(@"Error", nil), @"Current process memory budget is too low for this Java heap. Lower memory allocation and try again.");
             return 1;
@@ -3960,15 +3998,18 @@ int launchJVM(NSString *accountId, id launchTarget, int width, int height, int m
     PUSH_MARGV_FORMAT(@"-XX:ErrorFile=%@/hs_err_pid%%p.log", @(getenv("POJAV_HOME")));
 
     setenv("INTERNAL_JLI_PATH", (isJava8 ? libjlipath8 : libjlipath11).UTF8String, 1);
+    prismaStartupCheckpoint(@"JLI dlopen begin");
     void* libjli = dlopen(getenv("INTERNAL_JLI_PATH"), RTLD_GLOBAL);
-
     if (!libjli) {
         const char *error = dlerror();
+        prismaStartupCheckpoint(@"JLI dlopen failed");
         NSLog(@"[Init] JLI lib = NULL: %s", error);
         UIKit_returnToSplitView();
         showDialog(localize(@"Error", nil), @(error));
         return 1;
     }
+
+    prismaStartupCheckpoint(@"JLI dlopen loaded");
 
     // Setup Caciocavallo
     PUSH_MARGV_LITERAL("-Djava.awt.headless=false");
@@ -4251,6 +4292,7 @@ int launchJVM(NSString *accountId, id launchTarget, int width, int height, int m
 
     pJLI_Launch = (JLI_Launch_func *)dlsym(libjli, "JLI_Launch");
 
+    prismaStartupCheckpoint(@"JLI symbol resolved=%d", pJLI_Launch != NULL);
     if (NULL == pJLI_Launch) {
         NSLog(@"[Init] JLI_Launch = NULL");
         return -2;
@@ -4297,7 +4339,9 @@ int launchJVM(NSString *accountId, id launchTarget, int width, int height, int m
     //   （launchHeadlessJVM）不经过此处，Task144 抑制语义零回归。
     ame251_armShutdownForceExitWatchdog();
 
-    return pJLI_Launch(++margc, margv,
+    prismaStartupCheckpoint(@"entering JLI_Launch heapMiB=%d csDebugged=%d ptrace=%d exceptionPorts=%d",
+        allocmem, isJITEnabled(YES), JIT26DebuggerAttachedViaPtrace(), JIT26DebuggerViaExceptionPorts());
+    int result = pJLI_Launch(++margc, margv,
                    0, NULL, // sizeof(const_jargs) / sizeof(char *), const_jargs,
                    0, NULL, // sizeof(const_appclasspath) / sizeof(char *), const_appclasspath,
                    // These values are ignored in Java 17, so keep it anyways
@@ -4307,6 +4351,9 @@ int launchJVM(NSString *accountId, id launchTarget, int width, int height, int m
                    "java", "openjdk",
                    /* (const_jargs != NULL) ? JNI_TRUE : */ JNI_FALSE,
                    JNI_TRUE, JNI_FALSE, JNI_TRUE);
+    prismaStartupCheckpoint(@"JLI_Launch returned exitCode=%d", result);
+    ame306_endGameSessionMarker();
+    return result;
 }
 
 // ============================================================================
