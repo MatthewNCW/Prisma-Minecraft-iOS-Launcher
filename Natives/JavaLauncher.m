@@ -2253,8 +2253,10 @@ static void* ame301_createRegionWithWatchdog(void) {
     if (dispatch_semaphore_wait(ame301_done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)20 * NSEC_PER_SEC)) == 0) {
         return ame301_region;
     }
-    NSLog(@"[JIT] [JavaLauncher] Task301 brk handshake stalled >20s (dead debugger exception port?) -- auto-running builtin JIT track to service it");
-    BOOL ame301_builtinAvail = [StikDebugViewController ame294_builtinTrackAvailable];
+    BOOL externalStikDebug = [getPrefObject(@"debug.jit_enabler") isEqual:@"stikjit"];
+    BOOL ame301_builtinAvail = !externalStikDebug && [StikDebugViewController ame294_builtinTrackAvailable];
+    prismaStartupCheckpoint(@"JIT region handshake stalled externalStikDebug=%d builtinRecovery=%d",
+        externalStikDebug, ame301_builtinAvail);
     if (ame301_builtinAvail) {
         dispatch_semaphore_t ame301_builtinSem = dispatch_semaphore_create(0);
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -2328,7 +2330,8 @@ static BOOL ame304_requestAndAwaitJITIfNeeded(NSString *tag) {
         NSString *ame304_bundleId = NSBundle.mainBundle.bundleIdentifier;
         // Task294/302 同口径：builtin 显式 + auto 非 TS 环境按可用性
         BOOL ame304_isTrollStore = getEntitlementValue(@"jb.pmap_cs.custom_trust") && isTrollStoreInstall();
-        BOOL ame304_builtinAvail = [StikDebugViewController ame294_builtinTrackAvailable];
+        BOOL ame304_builtinAvail = ![ame304_enabler isEqualToString:@"stikjit"] &&
+            [StikDebugViewController ame294_builtinTrackAvailable];
         BOOL ame304_useBuiltin = NO;
         if ([ame304_enabler isEqualToString:@"builtin"]) {
             ame304_useBuiltin = YES;
@@ -2580,7 +2583,9 @@ int launchJVM(NSString *accountId, id launchTarget, int width, int height, int m
             [PLLogOutputView handleExitCode:1];
             return 1;
         }
+        prismaStartupCheckpoint(@"JIT extension script begin");
         JIT26SendJITScript([NSString stringWithContentsOfFile:[NSBundle.mainBundle pathForResource:@"UniversalJIT26Extension" ofType:@"js"]]);
+        prismaStartupCheckpoint(@"JIT extension script sent");
         JIT26SetDetachAfterFirstBr(!jit26AlwaysAttached);
         // make sure we don't get stuck in EXC_BAD_ACCESS
         task_set_exception_ports(mach_task_self(), EXC_MASK_BAD_ACCESS, 0, EXCEPTION_DEFAULT, MACHINE_THREAD_STATE);

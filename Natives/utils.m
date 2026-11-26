@@ -96,8 +96,8 @@ void prismaStartupCheckpoint(NSString *format, ...) {
     va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-    NSData *line = [[NSString stringWithFormat:@"%.3f pid=%d %@\n",
-        NSDate.date.timeIntervalSince1970, getpid(), message] dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *line = [[NSString stringWithFormat:@"%.0f pid=%d %@\n",
+        NSDate.date.timeIntervalSince1970 * 1000, getpid(), message] dataUsingEncoding:NSUTF8StringEncoding];
     NSString *path = [@(home) stringByAppendingPathComponent:@"startup-checkpoints.txt"];
 
     // This path goes directly to disk, independently of the stdout/stderr reader.
